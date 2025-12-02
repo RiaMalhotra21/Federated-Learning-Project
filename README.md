@@ -19,11 +19,11 @@ to collaboratively train a model for fraud detection without sharing raw data.
 ├── results/ (plots, metrics)  
 
 ## 📈 Results
-Current accuracy: ~50%  
+Current accuracy: ~79%  
 Next improvements planned:
 - Model tuning (optimizer, dropout)
-- Balanced dataset handling
-- Increased training rounds
+- Deployment
+- Use advanced models
 
 ## 🧩 Tech Stack
 Python, TensorFlow/Keras, Flask, HTML/CSS/JS
