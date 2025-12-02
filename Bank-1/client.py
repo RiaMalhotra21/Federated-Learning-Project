@@ -1,140 +1,128 @@
-import torch
-import requests
-import time
-import sys
 import os
+import time
+import requests
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Add parent directory to path so we can import model
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from model import FraudDetectionModel, load_and_prepare_data, train_model, evaluate_model
 
-from model import SimpleFraudModel, load_and_prepare_data, train_simple_model, evaluate_simple_model
+SERVER_URL = "http://localhost:5000"
+CLIENT_ID = "Bank-1"
+ROUNDS = 5
+EPOCHS_PER_ROUND = 5          # reduce for quicker iterations if needed
+SLEEP_BETWEEN_STEPS = 2
 
-# Simple client class
-class SimpleClient:
-    def __init__(self, client_id, data_file):
-        self.client_id = client_id
-        self.data_file = data_file
-        self.model = SimpleFraudModel()
-        
-        # Load data
-        print(f"Loading data for {client_id}...")
+def serialize_state(state_dict):
+    """Convert torch state_dict to JSON-serializable lists"""
+    return {k: v.cpu().numpy().tolist() for k, v in state_dict.items()}
+
+def deserialize_state_to_model(model, state_json):
+    """Load JSON state into model (handles missing keys and dtype)"""
+    state = {}
+    for k, v in state_json.items():
+        # guard: strip possible 'module.' prefix
+        norm_k = k
+        if norm_k.startswith("module."):
+            norm_k = norm_k[len("module."):]
+        state[norm_k] = torch.tensor(v, dtype=torch.float32)
+    # Only load keys that match
+    model_state = model.state_dict()
+    for k in list(model_state.keys()):
+        if k in state and state[k].shape == model_state[k].shape:
+            model_state[k] = state[k]
+    model.load_state_dict(model_state)
+    return model
+
+def send_model_to_server(model):
+    payload = {
+        'client_id': CLIENT_ID,
+        'model_state': serialize_state(model.state_dict())
+    }
+    try:
+        r = requests.post(f"{SERVER_URL}/submit_model", json=payload, timeout=10)
+        return r.status_code == 200 and r.json().get('status') == 'received'
+    except Exception as e:
+        print(f"❌ Error sending model: {e}")
+        return False
+
+def fetch_global_model():
+    try:
+        r = requests.get(f"{SERVER_URL}/get_global", timeout=10)
+        if r.status_code == 200:
+            return r.json()
+        return None
+    except Exception as e:
+        print(f"❌ Error fetching global model: {e}")
+        return None
+
+def wait_for_aggregation(target_round, poll_interval=2, timeout=120):
+    """Poll server until server.round >= target_round (or timeout)"""
+    start = time.time()
+    while time.time() - start < timeout:
         try:
-            self.X, self.y = load_and_prepare_data(data_file)
-            print(f"✅ Loaded {len(self.X)} samples")
-        except Exception as e:
-            print(f"❌ Error loading data: {e}")
-            raise e
-    
-    def get_global_model(self):
-        """Download global model from server"""
-        try:
-            response = requests.get("http://localhost:5000/get_model", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                model_state = data['model_state']
-                
-                # Convert to tensors
-                state_dict = {}
-                for key, value in model_state.items():
-                    state_dict[key] = torch.tensor(value)
-                
-                self.model.load_state_dict(state_dict)
-                print(f"✅ Downloaded global model")
-                return True
-            else:
-                print(f"❌ Failed to get model: {response.status_code}")
-                return False
-        except Exception as e:
-            print(f"❌ Error: {e}")
-            return False
-    
-    def train_local_model(self):
-        """Train model on local data"""
-        try:
-            print(f"Training {self.client_id} model...")
-            self.model = train_simple_model(self.model, self.X, self.y, epochs=3)
-            
-            # Check accuracy
-            accuracy = evaluate_simple_model(self.model, self.X, self.y)
-            print(f"✅ {self.client_id} accuracy: {accuracy:.3f}")
-            return accuracy
-        except Exception as e:
-            print(f"❌ Training error: {e}")
-            return 0.0
-    
-    def submit_model(self):
-        """Send model to server"""
-        try:
-            # Get model state
-            model_state = self.model.state_dict()
-            
-            # Convert to lists
-            serializable_state = {}
-            for key, value in model_state.items():
-                serializable_state[key] = value.cpu().numpy().tolist()
-            
-            # Send to server
-            data = {
-                'client_id': self.client_id,
-                'model_state': serializable_state
-            }
-            
-            response = requests.post("http://localhost:5000/submit_model", json=data, timeout=10)
-            
-            if response.status_code == 200:
-                print(f"✅ {self.client_id} model submitted")
-                return True
-            else:
-                print(f"❌ Failed to submit: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"❌ Error submitting: {e}")
-            return False
-    
-    def participate_in_round(self):
-        """Do one round of federated learning"""
-        print(f"\n🔄 {self.client_id} - Starting Round")
-        
-        # Get global model
-        if not self.get_global_model():
-            print(f"❌ {self.client_id} failed to get global model")
-            return None
-        
-        # Train locally
-        accuracy = self.train_local_model()
-        
-        # Submit model
-        if not self.submit_model():
-            print(f"❌ {self.client_id} failed to submit model")
-            return None
-        
-        return accuracy
+            r = requests.get(f"{SERVER_URL}/status", timeout=5)
+            if r.status_code == 200:
+                jr = r.json()
+                if jr.get('round', 0) >= target_round:
+                    return True
+        except:
+            pass
+        time.sleep(poll_interval)
+    return False
 
 def main():
-    try:
-        # Create client
-        client = SimpleClient("Bank-1", "bank1.csv")
-        
-        # Do 5 rounds
-        for round_num in range(5):
-            print(f"\n{'='*40}")
-            print(f"ROUND {round_num + 1}/5")
-            print(f"{'='*40}")
-            
-            accuracy = client.participate_in_round()
-            
-            if accuracy is not None:
-                print(f"✅ Round {round_num + 1} completed! Accuracy: {accuracy:.3f}")
+    # load data
+    file_path = os.path.join(os.path.dirname(__file__), "bank1.csv")
+    X_train, X_test, y_train, y_test, input_dim = load_and_prepare_data(file_path, apply_smote=True)
+
+    # initialize model
+    model = FraudDetectionModel(input_dim)
+
+    # main federated loop
+    for rnd in range(ROUNDS):
+        print(f"\n🔁 CLIENT {CLIENT_ID} — Local Round {rnd+1}/{ROUNDS}")
+
+        # local training (you can change to train only a few epochs per round)
+        model = train_model(model, X_train, y_train, epochs=EPOCHS_PER_ROUND, lr=0.0007)
+
+        # evaluate locally for logging
+        evaluate_model(model, X_test, y_test)
+
+        # send model to server
+        success = send_model_to_server(model)
+        if not success:
+            print("❌ Failed to send model to server. Will retry shortly...")
+            time.sleep(5)
+            success = send_model_to_server(model)
+            if not success:
+                print("❌ Second attempt failed. Exiting client.")
+                return
+
+        # wait until server finishes aggregation for this round (server.round should increment)
+        current_server_round = 0
+        # we expect server to increase to rnd+1 after aggregation
+        target_round = rnd + 1
+        print(f"⏳ Waiting for server aggregation to complete for round {target_round}...")
+        ok = wait_for_aggregation(target_round, poll_interval=2, timeout=180)
+        if not ok:
+            print("❌ Timeout waiting for aggregation. Continuing anyway.")
+        else:
+            print("✅ Detected aggregated global model on server. Fetching...")
+
+            gm = fetch_global_model()
+            if gm and gm.get('status') == 'ok':
+                model = deserialize_state_to_model(model, gm['model_state'])
+                print("✅ Global model loaded into client.")
             else:
-                print(f"❌ Round {round_num + 1} failed!")
-            
-            time.sleep(2)  # Wait before next round
-        
-        print("\n🎉 Federated learning completed!")
-        
-    except Exception as e:
-        print(f"❌ Client error: {e}")
+                print("⚠️ Could not fetch global model content.")
+
+        time.sleep(SLEEP_BETWEEN_STEPS)
+
+    print("\n🎉 CLIENT finished all rounds. Exiting.")
 
 if __name__ == "__main__":
-    main() 
+    main()
