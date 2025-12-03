@@ -100,21 +100,6 @@ with col4:
     else:
         st.metric("🎯 F1-Score", "N/A")
 
-# Action button
-st.sidebar.markdown("---")
-if st.sidebar.button("🔄 Combine Models", type="primary"):
-    with st.spinner("Combining models from both banks..."):
-        result = trigger_aggregation()
-        if result:
-            st.sidebar.success("✅ Models combined successfully!")
-            st.sidebar.write(f"Round: {result['round']}")
-            if 'metrics' in result:
-                metrics = result['metrics']
-                st.sidebar.write(f"Accuracy: {metrics['accuracy']:.3f}")
-                st.sidebar.write(f"F1-Score: {metrics['f1_score']:.3f}")
-        else:
-            st.sidebar.error("❌ Failed to combine models!")
-
 # Main content area
 st.markdown("---")
 
